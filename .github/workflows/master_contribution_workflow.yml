@@ -1,32 +1,10 @@
 name: Master Contribution Workflow
 
 on:
-  issues: 
+  issues:
     types: [opened, reopened]
   pull_request_target:
     types: [opened, reopened, synchronize, ready_for_review, closed]
-  workflow_dispatch:
-    inputs:
-      target_type:
-        description: 'What to act on'
-        required: true
-        default: 'issue'
-        type: choice
-        options:
-          - issue
-          - pull_request
-      target_number:
-        description: 'Issue or PR number to act on'
-        required: true
-        type: number
-      action:
-        description: 'Action to simulate (for PR only)'
-        required: false
-        default: 'opened'
-        type: choice
-        options:
-          - opened
-          - closed_and_merged
 
 permissions:
   issues: write
@@ -47,48 +25,49 @@ jobs:
         with:
           script: |
             const owner = context.repo.owner;
-            const repo  = context.repo.repo;
+            const repo = context.repo.repo;
+            const issue = context.payload.issue;
+            const pr = context.payload.pull_request;
 
-            // ── Resolve payload: real event vs manual workflow_dispatch ─
+            const contributorGuide = `
+            Hi @${issue ? issue.user.login : pr.user.login} 👋
 
-            let issue = context.payload.issue        ?? null;
-            let pr    = context.payload.pull_request ?? null;
+            Thanks for contributing.
 
-            if (context.eventName === 'workflow_dispatch') {
-              const targetType   = context.payload.inputs.target_type;
-              const targetNumber = Number(context.payload.inputs.target_number);
-              const action       = context.payload.inputs.action;
+            To keep this project fair, clear, and easy to review, please follow this flow:
 
-              if (targetType === 'issue') {
-                const { data } = await github.rest.issues.get({
-                  owner, repo, issue_number: targetNumber
-                });
-                issue = data;
-              } else {
-                const { data } = await github.rest.pulls.get({
-                  owner, repo, pull_number: targetNumber
-                });
-                pr = { ...data };
-                // Simulate the requested action so the rest of the
-                // script behaves as if the normal event had fired.
-                if (action === 'closed_and_merged') {
-                  pr.merged = true;
-                  context.payload.action = 'closed';
-                } else {
-                  context.payload.action = 'opened';
-                }
-              }
-            }
+            1. Open one focused issue.
+               - Keep the issue specific and well described.
+               - Avoid mixing multiple unrelated tasks in one issue.
 
-            // ── Determine event type early so nothing below references
-            //    undefined payloads. contributorGuide is built lazily
-            //    (only when issueOpened is true) to avoid accessing
-            //    pr.user when the event is an issue, and vice-versa.
-            const isDispatch        = context.eventName === 'workflow_dispatch';
-            const issueOpened       = Boolean(issue && (context.eventName === 'issues'              || (isDispatch && context.payload.inputs.target_type === 'issue')));
-            const prOpenedOrUpdated = Boolean(pr    && (context.eventName === 'pull_request_target' || (isDispatch && context.payload.inputs.target_type === 'pull_request')));
+            2. Wait for maintainer review before starting work.
+               - Please do not begin implementation until the issue is acknowledged or assigned.
+               - This helps avoid duplicated work.
 
-            // ── Helpers ────────────────────────────────────────────────
+            3. Work on one active issue at a time, especially as a new contributor.
+               - Finish the current issue first.
+               - After your PR is merged, you may pick up the next issue.
+
+            4. Open a pull request linked to the issue.
+               - Use clear wording in the PR body.
+               - Prefer "Fixes #<issue>" or "Closes #<issue>" when applicable.
+
+            5. Close the issue politely once the PR is merged.
+               - If your PR resolves the issue, the issue should be closed through the PR or by the maintainers.
+               - Please keep the issue thread respectful and concise.
+
+            Additional rules:
+            - Do not claim multiple issues at once without permission.
+            - Keep pull requests small and relevant.
+            - Do not open duplicate issues or duplicate PRs.
+            - If the implementation changes direction, update the issue thread early.
+            - If you are blocked, comment so the issue can be released for someone else.
+
+            We appreciate careful, high-quality work. Small, focused contributions are easier to review and much easier to merge.
+            `;
+
+            const issueOpened = Boolean(issue && context.eventName === 'issues');
+            const prOpenedOrUpdated = Boolean(pr && context.eventName === 'pull_request_target');
 
             async function addComment(number, body) {
               await github.rest.issues.createComment({
@@ -106,9 +85,9 @@ jobs:
                 repo,
                 issue_number: number,
                 labels
-              }).catch(error => {
-                // 404 = issue/label not found, 422 = already applied — both are fine
-                if (error.status === 404 || error.status === 422) return;
+              }).catch(async (error) => {
+                if (error.status === 404) return;
+                if (error.status === 422) return;
                 throw error;
               });
             }
@@ -119,31 +98,29 @@ jobs:
               } catch (error) {
                 if (error.status !== 404) throw error;
                 await github.rest.issues.createLabel({
-                  owner, repo, name, color, description
+                  owner,
+                  repo,
+                  name,
+                  color,
+                  description
                 }).catch(e => {
-                  // 422 means the label was created in a concurrent run — ignore
                   if (e.status !== 422) throw e;
                 });
               }
             }
 
-            // Bug fix: use named capture groups so both patterns extract
-            // the issue number from the correct group regardless of
-            // whether the optional "owner/repo" prefix is present.
             async function parseLinkedIssues(body) {
               if (!body) return [];
               const ids = new Set();
               const patterns = [
-                // "Fixes #123"
-                /(?:fix(?:es|ed)?|close(?:s|d)?|resolve(?:s|d)?)\s+#(?<issueNum>\d+)/gi,
-                // "Fixes owner/repo#123"
-                /(?:fix(?:es|ed)?|close(?:s|d)?|resolve(?:s|d)?)\s+[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#(?<issueNum>\d+)/gi
+                /(?:fix(?:es|ed)?|close(?:s|d)?|resolve(?:s|d)?)\s+#(\d+)/gi,
+                /(?:fix(?:es|ed)?|close(?:s|d)?|resolve(?:s|d)?)\s+([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#(\d+)/gi
               ];
 
               for (const pattern of patterns) {
                 let match;
                 while ((match = pattern.exec(body)) !== null) {
-                  const n = Number(match.groups.issueNum);
+                  const n = match[2] ? Number(match[2]) : Number(match[1]);
                   if (Number.isInteger(n) && n > 0) ids.add(n);
                 }
               }
@@ -151,120 +128,72 @@ jobs:
               return [...ids];
             }
 
-            // ── Ensure all status labels exist ─────────────────────────
-
-            await ensureLabel('status:needs-review',   'd4c5f9', 'Waiting for maintainer review');
-            await ensureLabel('status:in-progress',    'b6e3ff', 'Work is currently in progress');
-            await ensureLabel('status:needs-info',     'ffd6a5', 'Needs clarification or more details');
-            await ensureLabel('status:blocked',        'ffb3c7', 'Blocked pending response');
-            await ensureLabel('status:duplicate',      'ffadad', 'Duplicate issue or PR');
+            await ensureLabel('status:needs-review', 'd4c5f9', 'Waiting for maintainer review');
+            await ensureLabel('status:in-progress', 'b6e3ff', 'Work is currently in progress');
+            await ensureLabel('status:needs-info', 'ffd6a5', 'Needs clarification or more details');
+            await ensureLabel('status:blocked', 'ffb3c7', 'Blocked pending response');
+            await ensureLabel('status:duplicate', 'ffadad', 'Duplicate issue or PR');
             await ensureLabel('status:ready-to-close', 'b7eb8f', 'Ready to be closed after merge');
 
-            // ── Issue opened / reopened ────────────────────────────────
-
             if (issueOpened) {
-              // contributorGuide is built here — inside the issueOpened
-              // branch — so issue is guaranteed to be defined.
-              const contributorGuide = `
-Hi @${issue.user.login} 👋
-
-Thanks for contributing.
-
-To keep this project fair, clear, and easy to review, please follow this flow:
-
-1. Open one focused issue.
-   - Keep the issue specific and well described.
-   - Avoid mixing multiple unrelated tasks in one issue.
-
-2. Wait for maintainer review before starting work.
-   - Please do not begin implementation until the issue is acknowledged or assigned.
-   - This helps avoid duplicated work.
-
-3. Work on one active issue at a time, especially as a new contributor.
-   - Finish the current issue first.
-   - After your PR is merged, you may pick up the next issue.
-
-4. Open a pull request linked to the issue.
-   - Use clear wording in the PR body.
-   - Prefer "Fixes #<issue>" or "Closes #<issue>" when applicable.
-
-5. Close the issue politely once the PR is merged.
-   - If your PR resolves the issue, the issue should be closed through the PR or by the maintainers.
-   - Please keep the issue thread respectful and concise.
-
-Additional rules:
-- Do not claim multiple issues at once without permission.
-- Keep pull requests small and relevant.
-- Do not open duplicate issues or duplicate PRs.
-- If the implementation changes direction, update the issue thread early.
-- If you are blocked, comment so the issue can be released for someone else.
-
-We appreciate careful, high-quality work. Small, focused contributions are easier to review and much easier to merge.
-              `;
-
               await addComment(issue.number, contributorGuide);
               await addLabels(issue.number, ['status:needs-review']);
             }
-
-            // ── PR opened / updated / closed ──────────────────────────
 
             if (prOpenedOrUpdated) {
               const linkedIssues = await parseLinkedIssues(pr.body || '');
 
               if (context.payload.action !== 'closed') {
                 if (!linkedIssues.length) {
-                  const noLinkBody = `
-Hi @${pr.user.login} 👋
+                  const body = `
+                  Hi @${pr.user.login} 👋
 
-Thanks for the pull request.
+                  Thanks for the pull request.
 
-Please link this PR to a relevant issue before review. A good PR should be:
-- tied to one approved issue
-- focused on a single task
-- easy to review
-- free of unrelated changes
+                  Please link this PR to a relevant issue before review. A good PR should be:
+                  - tied to one approved issue
+                  - focused on a single task
+                  - easy to review
+                  - free of unrelated changes
 
-Recommended format:
-- \`Fixes #123\`
-- \`Closes #123\`
-- \`Resolves #123\`
+                  Recommended format:
+                  - \`Fixes #123\`
+                  - \`Closes #123\`
+                  - \`Resolves #123\`
 
-Once the PR is accepted and merged, the issue should be closed politely and the next issue can be picked up.
+                  Once the PR is accepted and merged, the issue should be closed politely and the next issue can be picked up.
                   `;
-                  await addComment(pr.number, noLinkBody);
+                  await addComment(pr.number, body);
                 } else {
                   for (const number of linkedIssues) {
                     await addComment(number, `
-Hi @${pr.user.login} 👋
+                    Hi @${pr.user.login} 👋
 
-This issue has been linked to a pull request. Thank you for working on it carefully.
+                    This issue has been linked to a pull request. Thank you for working on it carefully.
 
-Please keep the PR focused, and once the PR is merged, this issue will be closed politely through the normal review flow.
+                    Please keep the PR focused, and once the PR is merged, this issue will be closed politely through the normal review flow.
                     `);
                     await addLabels(number, ['status:in-progress']);
                   }
                 }
               }
 
-              // Bug fix: use strict === true check; pr.merged is null
-              // (not undefined) when a PR is closed without merging.
-              if (context.payload.action === 'closed' && pr.merged === true) {
+              if (context.payload.action === 'closed' && pr.merged) {
                 const mergedIssues = await parseLinkedIssues(pr.body || '');
                 for (const number of mergedIssues) {
                   await addComment(number, `
-Hi @${pr.user.login} 👋
+                  Hi @${pr.user.login} 👋
 
-This issue has been resolved by a merged pull request. Thank you for the disciplined contribution.
+                  This issue has been resolved by a merged pull request. Thank you for the disciplined contribution.
 
-Closing this issue now to keep the workflow clean and up to date.
+                  Closing this issue now to keep the workflow clean and up to date.
                   `);
                   await github.rest.issues.update({
                     owner,
                     repo,
                     issue_number: number,
                     state: 'closed'
-                  }).catch(error => {
-                    // 404 = already deleted, 410 = permanently gone — both are fine
+                  }).catch(async (error) => {
                     if (error.status === 404 || error.status === 410) return;
                     throw error;
                   });
