@@ -1,0 +1,202 @@
+name: Master Contribution Workflow
+
+on:
+  issues:
+    types: [opened, reopened]
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review, closed]
+
+permissions:
+  issues: write
+  pull-requests: write
+  contents: read
+
+concurrency:
+  group: master-contribution-workflow-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number || 'manual' }}
+  cancel-in-progress: false
+
+jobs:
+  guide_and_enforce:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Act on issue or pull request
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const issue = context.payload.issue;
+            const pr = context.payload.pull_request;
+
+            const contributorGuide = `
+            Hi @${issue ? issue.user.login : pr.user.login} 👋
+
+            Thanks for contributing.
+
+            To keep this project fair, clear, and easy to review, please follow this flow:
+
+            1. Open one focused issue.
+               - Keep the issue specific and well described.
+               - Avoid mixing multiple unrelated tasks in one issue.
+
+            2. Wait for maintainer review before starting work.
+               - Please do not begin implementation until the issue is acknowledged or assigned.
+               - This helps avoid duplicated work.
+
+            3. Work on one active issue at a time, especially as a new contributor.
+               - Finish the current issue first.
+               - After your PR is merged, you may pick up the next issue.
+
+            4. Open a pull request linked to the issue.
+               - Use clear wording in the PR body.
+               - Prefer "Fixes #<issue>" or "Closes #<issue>" when applicable.
+
+            5. Close the issue politely once the PR is merged.
+               - If your PR resolves the issue, the issue should be closed through the PR or by the maintainers.
+               - Please keep the issue thread respectful and concise.
+
+            Additional rules:
+            - Do not claim multiple issues at once without permission.
+            - Keep pull requests small and relevant.
+            - Do not open duplicate issues or duplicate PRs.
+            - If the implementation changes direction, update the issue thread early.
+            - If you are blocked, comment so the issue can be released for someone else.
+
+            We appreciate careful, high-quality work. Small, focused contributions are easier to review and much easier to merge.
+            `;
+
+            const issueOpened = Boolean(issue && context.eventName === 'issues');
+            const prOpenedOrUpdated = Boolean(pr && context.eventName === 'pull_request_target');
+
+            async function addComment(number, body) {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: number,
+                body
+              });
+            }
+
+            async function addLabels(number, labels) {
+              if (!labels || !labels.length) return;
+              await github.rest.issues.addLabels({
+                owner,
+                repo,
+                issue_number: number,
+                labels
+              }).catch(async (error) => {
+                if (error.status === 404) return;
+                if (error.status === 422) return;
+                throw error;
+              });
+            }
+
+            async function ensureLabel(name, color, description) {
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name });
+              } catch (error) {
+                if (error.status !== 404) throw error;
+                await github.rest.issues.createLabel({
+                  owner,
+                  repo,
+                  name,
+                  color,
+                  description
+                }).catch(e => {
+                  if (e.status !== 422) throw e;
+                });
+              }
+            }
+
+            async function parseLinkedIssues(body) {
+              if (!body) return [];
+              const ids = new Set();
+              const patterns = [
+                /(?:fix(?:es|ed)?|close(?:s|d)?|resolve(?:s|d)?)\s+#(\d+)/gi,
+                /(?:fix(?:es|ed)?|close(?:s|d)?|resolve(?:s|d)?)\s+([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#(\d+)/gi
+              ];
+
+              for (const pattern of patterns) {
+                let match;
+                while ((match = pattern.exec(body)) !== null) {
+                  const n = match[2] ? Number(match[2]) : Number(match[1]);
+                  if (Number.isInteger(n) && n > 0) ids.add(n);
+                }
+              }
+
+              return [...ids];
+            }
+
+            await ensureLabel('status:needs-review', 'd4c5f9', 'Waiting for maintainer review');
+            await ensureLabel('status:in-progress', 'b6e3ff', 'Work is currently in progress');
+            await ensureLabel('status:needs-info', 'ffd6a5', 'Needs clarification or more details');
+            await ensureLabel('status:blocked', 'ffb3c7', 'Blocked pending response');
+            await ensureLabel('status:duplicate', 'ffadad', 'Duplicate issue or PR');
+            await ensureLabel('status:ready-to-close', 'b7eb8f', 'Ready to be closed after merge');
+
+            if (issueOpened) {
+              await addComment(issue.number, contributorGuide);
+              await addLabels(issue.number, ['status:needs-review']);
+            }
+
+            if (prOpenedOrUpdated) {
+              const linkedIssues = await parseLinkedIssues(pr.body || '');
+
+              if (context.payload.action !== 'closed') {
+                if (!linkedIssues.length) {
+                  const body = `
+                  Hi @${pr.user.login} 👋
+
+                  Thanks for the pull request.
+
+                  Please link this PR to a relevant issue before review. A good PR should be:
+                  - tied to one approved issue
+                  - focused on a single task
+                  - easy to review
+                  - free of unrelated changes
+
+                  Recommended format:
+                  - \`Fixes #123\`
+                  - \`Closes #123\`
+                  - \`Resolves #123\`
+
+                  Once the PR is accepted and merged, the issue should be closed politely and the next issue can be picked up.
+                  `;
+                  await addComment(pr.number, body);
+                } else {
+                  for (const number of linkedIssues) {
+                    await addComment(number, `
+                    Hi @${pr.user.login} 👋
+
+                    This issue has been linked to a pull request. Thank you for working on it carefully.
+
+                    Please keep the PR focused, and once the PR is merged, this issue will be closed politely through the normal review flow.
+                    `);
+                    await addLabels(number, ['status:in-progress']);
+                  }
+                }
+              }
+
+              if (context.payload.action === 'closed' && pr.merged) {
+                const mergedIssues = await parseLinkedIssues(pr.body || '');
+                for (const number of mergedIssues) {
+                  await addComment(number, `
+                  Hi @${pr.user.login} 👋
+
+                  This issue has been resolved by a merged pull request. Thank you for the disciplined contribution.
+
+                  Closing this issue now to keep the workflow clean and up to date.
+                  `);
+                  await github.rest.issues.update({
+                    owner,
+                    repo,
+                    issue_number: number,
+                    state: 'closed'
+                  }).catch(async (error) => {
+                    if (error.status === 404 || error.status === 410) return;
+                    throw error;
+                  });
+                }
+              }
+            }
