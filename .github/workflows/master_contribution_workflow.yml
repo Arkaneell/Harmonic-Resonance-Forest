@@ -190,7 +190,7 @@ jobs:
             function extractLinkedIssueNumbers(body) {
               if (!body) return [];
               const numbers = new Set();
-              const regex = /\\b(?:fix(?:es|ed)?|close(?:s|d)?|resolve(?:s|d)?)\\s+(?:[A-Za-z0-9_.-]+\\/[A-Za-z0-9_.-]+#|#)(\\d+)\\b/gi;
+              const regex = /\b(?:fix(?:es|ed)?|close(?:s|d)?|resolve(?:s|d)?)\s+(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#|#)(\d+)\b/gi;
               let match;
               while ((match = regex.exec(body)) !== null) {
                 const n = Number(match[1]);
