@@ -2,6 +2,18 @@ name: Master Contribution Workflow
 
 on:
   workflow_dispatch:
+    inputs:
+      target_type:
+        description: Select whether to process an issue or a pull request
+        required: true
+        type: choice
+        options:
+          - issue
+          - pull_request
+      number:
+        description: Issue or pull request number
+        required: true
+        type: string
   issues:
     types: [opened, reopened]
   pull_request_target:
@@ -13,7 +25,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: master-contribution-workflow-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number || 'manual' }}
+  group: master-contribution-workflow-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number || github.event.inputs.number || 'manual' }}
   cancel-in-progress: false
 
 jobs:
@@ -27,11 +39,41 @@ jobs:
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
-            const issue = context.payload.issue;
-            const pr = context.payload.pull_request;
+
+            let issue = context.payload.issue ?? null;
+            let pr = context.payload.pull_request ?? null;
+
+            const isManualRun = context.eventName === 'workflow_dispatch';
+
+            if (isManualRun) {
+              const targetType = context.payload.inputs?.target_type;
+              const rawNumber = context.payload.inputs?.number;
+              const number = Number(rawNumber);
+
+              if (!Number.isInteger(number) || number <= 0) {
+                core.setFailed('workflow_dispatch requires a valid issue or pull request number.');
+                return;
+              }
+
+              if (targetType === 'issue') {
+                issue = (await github.rest.issues.get({ owner, repo, issue_number: number })).data;
+              } else if (targetType === 'pull_request') {
+                pr = (await github.rest.pulls.get({ owner, repo, pull_number: number })).data;
+              } else {
+                core.setFailed(`Unsupported target_type: ${targetType}`);
+                return;
+              }
+            }
+
+            if (!issue && !pr) {
+              core.info('No issue or pull request context found. Nothing to do.');
+              return;
+            }
+
+            const actor = issue?.user?.login || pr?.user?.login || context.actor;
 
             const contributorGuide = `
-            Hi @${issue ? issue.user.login : pr.user.login} 👋
+            Hi @${actor} 👋
 
             Thanks for contributing.
 
@@ -67,8 +109,8 @@ jobs:
             We appreciate careful, high-quality work. Small, focused contributions are easier to review and much easier to merge.
             `;
 
-            const issueOpened = Boolean(issue && context.eventName === 'issues');
-            const prOpenedOrUpdated = Boolean(pr && context.eventName === 'pull_request_target');
+            const issueOpened = Boolean(issue && (context.eventName === 'issues' || isManualRun));
+            const prOpenedOrUpdated = Boolean(pr && (context.eventName === 'pull_request_target' || isManualRun));
 
             async function addComment(number, body) {
               await github.rest.issues.createComment({
@@ -147,7 +189,7 @@ jobs:
               if (context.payload.action !== 'closed') {
                 if (!linkedIssues.length) {
                   const body = `
-                  Hi @${pr.user.login} 👋
+                  Hi @${actor} 👋
 
                   Thanks for the pull request.
 
@@ -168,7 +210,7 @@ jobs:
                 } else {
                   for (const number of linkedIssues) {
                     await addComment(number, `
-                    Hi @${pr.user.login} 👋
+                    Hi @${actor} 👋
 
                     This issue has been linked to a pull request. Thank you for working on it carefully.
 
@@ -183,7 +225,7 @@ jobs:
                 const mergedIssues = await parseLinkedIssues(pr.body || '');
                 for (const number of mergedIssues) {
                   await addComment(number, `
-                  Hi @${pr.user.login} 👋
+                  Hi @${actor} 👋
 
                   This issue has been resolved by a merged pull request. Thank you for the disciplined contribution.
 
