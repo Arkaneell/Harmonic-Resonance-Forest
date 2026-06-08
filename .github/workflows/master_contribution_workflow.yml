@@ -1,11 +1,32 @@
 name: Master Contribution Workflow
 
 on:
-  workflow_dispatch:
   issues:
     types: [opened, reopened]
   pull_request_target:
-    types: [opened, reopened, ready_for_review, synchronize, closed]
+    types: [opened, reopened, synchronize, ready_for_review, closed]
+  workflow_dispatch:
+    inputs:
+      target_type:
+        description: 'What to act on'
+        required: true
+        default: 'issue'
+        type: choice
+        options:
+          - issue
+          - pull_request
+      target_number:
+        description: 'Issue or PR number to act on'
+        required: true
+        type: number
+      action:
+        description: 'Action to simulate (for PR only)'
+        required: false
+        default: 'opened'
+        type: choice
+        options:
+          - opened
+          - closed_and_merged
 
 permissions:
   issues: write
@@ -27,15 +48,45 @@ jobs:
           script: |
             const owner = context.repo.owner;
             const repo  = context.repo.repo;
-            const issue = context.payload.issue;
-            const pr    = context.payload.pull_request;
+
+            // ── Resolve payload: real event vs manual workflow_dispatch ─
+
+            let issue = context.payload.issue        ?? null;
+            let pr    = context.payload.pull_request ?? null;
+
+            if (context.eventName === 'workflow_dispatch') {
+              const targetType   = context.payload.inputs.target_type;
+              const targetNumber = Number(context.payload.inputs.target_number);
+              const action       = context.payload.inputs.action;
+
+              if (targetType === 'issue') {
+                const { data } = await github.rest.issues.get({
+                  owner, repo, issue_number: targetNumber
+                });
+                issue = data;
+              } else {
+                const { data } = await github.rest.pulls.get({
+                  owner, repo, pull_number: targetNumber
+                });
+                pr = { ...data };
+                // Simulate the requested action so the rest of the
+                // script behaves as if the normal event had fired.
+                if (action === 'closed_and_merged') {
+                  pr.merged = true;
+                  context.payload.action = 'closed';
+                } else {
+                  context.payload.action = 'opened';
+                }
+              }
+            }
 
             // ── Determine event type early so nothing below references
             //    undefined payloads. contributorGuide is built lazily
             //    (only when issueOpened is true) to avoid accessing
             //    pr.user when the event is an issue, and vice-versa.
-            const issueOpened      = Boolean(issue && context.eventName === 'issues');
-            const prOpenedOrUpdated = Boolean(pr    && context.eventName === 'pull_request_target');
+            const isDispatch        = context.eventName === 'workflow_dispatch';
+            const issueOpened       = Boolean(issue && (context.eventName === 'issues'              || (isDispatch && context.payload.inputs.target_type === 'issue')));
+            const prOpenedOrUpdated = Boolean(pr    && (context.eventName === 'pull_request_target' || (isDispatch && context.payload.inputs.target_type === 'pull_request')));
 
             // ── Helpers ────────────────────────────────────────────────
 
