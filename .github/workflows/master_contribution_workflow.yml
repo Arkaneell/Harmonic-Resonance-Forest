@@ -37,7 +37,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  BURST_WINDOW_HOURS: 6
+  BURST_WINDOW_HOURS: 2
   STRONG_WINDOW_HOURS: 24
   BURST_THRESHOLD: 2
   STRONG_THRESHOLD: 4
