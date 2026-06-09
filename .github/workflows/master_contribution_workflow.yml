@@ -71,11 +71,20 @@ jobs:
             const contributorGuide = (actor, details) => `
             Hi @${actor} 👋
 
-            This repository uses a strict contribution gate to keep the issue tracker and PR queue usable for everyone.
+                 To maintain signal quality and review efficiency, this repository enforces a contribution rate limit.
 
-            ${details}
-
-            Please reopen or resubmit only after the report is narrowed to one clear problem, with reproducible details, logs, or a linked issue as appropriate.
+                 maximum of **2 issues within a 24-hour window** is allowed per contributor. If you have multiple related changes, please consolidate them into a single, well-structured pull request.
+                 
+                 This pull request has been automatically closed because the current activity exceeds the allowed threshold or matches burst patterns.
+                 
+                 Recent activity summary:
+                 
+                - ${burstStats.issues + burstStats.prs} contributions in the last ${BURST_WINDOW_HOURS} hours
+                - ${strongStats.issues + strongStats.prs} contributions in the last ${STRONG_WINDOW_HOURS} hours
+                
+                You may reopen with a focused and complete submission.
+                
+                Thank you for your understanding and for contributing thoughtfully.
             `;
 
             const isManualRun = context.eventName === 'workflow_dispatch';
@@ -301,7 +310,7 @@ jobs:
                 await addComment(itemNumber, `
                 Hi @${actor} 👋
 
-                To maintain signal quality and review efficiency, this repository enforces a contribution rate limit.
+                 To maintain signal quality and review efficiency, this repository enforces a contribution rate limit.
 
                  maximum of **2 issues within a 24-hour window** is allowed per contributor. If you have multiple related changes, please consolidate them into a single, well-structured pull request.
                  
