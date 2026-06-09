@@ -39,8 +39,8 @@ concurrency:
 env:
   BURST_WINDOW_HOURS: 6
   STRONG_WINDOW_HOURS: 24
-  BURST_THRESHOLD: 4
-  STRONG_THRESHOLD: 6
+  BURST_THRESHOLD: 2
+  STRONG_THRESHOLD: 4
   MIN_BODY_CHARS: 120
 
 jobs:
@@ -73,7 +73,7 @@ jobs:
 
                  To maintain signal quality and review efficiency, this repository enforces a contribution rate limit.
 
-                 maximum of **2 issues within a 24-hour window** is allowed per contributor. If you have multiple related changes, please consolidate them into a single, well-structured pull request.
+                 maximum of **4 issues within a 24-hour window** is allowed per contributor. If you have multiple related changes, please consolidate them into a single, well-structured pull request.
                  
                  This pull request has been automatically closed because the current activity exceeds the allowed threshold or matches burst patterns.
                  
@@ -312,7 +312,7 @@ jobs:
 
                  To maintain signal quality and review efficiency, this repository enforces a contribution rate limit.
 
-                 maximum of **2 issues within a 24-hour window** is allowed per contributor. If you have multiple related changes, please consolidate them into a single, well-structured pull request.
+                 maximum of **4 issues within a 24-hour window** is allowed per contributor. If you have multiple related changes, please consolidate them into a single, well-structured pull request.
                  
                  This pull request has been automatically closed because the current activity exceeds the allowed threshold or matches burst patterns.
                  
