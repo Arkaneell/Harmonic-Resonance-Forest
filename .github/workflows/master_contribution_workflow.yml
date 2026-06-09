@@ -40,7 +40,7 @@ env:
   BURST_WINDOW_HOURS: 6
   STRONG_WINDOW_HOURS: 24
   BURST_THRESHOLD: 2
-  STRONG_THRESHOLD: 4
+  STRONG_THRESHOLD: 2
   MIN_BODY_CHARS: 120
 
 jobs:
@@ -301,13 +301,21 @@ jobs:
                 await addComment(itemNumber, `
                 Hi @${actor} 👋
 
-                This issue is being closed automatically because it appears to be part of a rapid burst, duplicate pattern, or low-signal contribution.
+                To maintain signal quality and review efficiency, this repository enforces a contribution rate limit.
 
-                Recent activity in this repository for this author:
+                 maximum of **2 issues within a 24-hour window** is allowed per contributor. If you have multiple related changes, please consolidate them into a single, well-structured pull request.
+                 
+                 This pull request has been automatically closed because the current activity exceeds the allowed threshold or matches burst patterns.
+                 
+                 Recent activity summary:
+                 
                 - ${burstStats.issues + burstStats.prs} contributions in the last ${BURST_WINDOW_HOURS} hours
                 - ${strongStats.issues + strongStats.prs} contributions in the last ${STRONG_WINDOW_HOURS} hours
-
-                Please reopen only with a single, focused report that includes reproduction steps, expected behavior, actual behavior, and logs or code references.
+                
+                You may reopen with a focused and complete submission.
+                
+                Thank you for your understanding and for contributing thoughtfully.
+                
                 `);
                 await closeIssue(itemNumber);
               }
