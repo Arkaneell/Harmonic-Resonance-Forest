@@ -14,10 +14,18 @@ on:
         description: Issue or pull request number
         required: true
         type: string
+      mode:
+        description: Choose whether to audit or enforce
+        required: false
+        type: choice
+        default: enforce
+        options:
+          - audit
+          - enforce
   issues:
-    types: [opened, reopened]
+    types: [opened, reopened, edited]
   pull_request_target:
-    types: [opened, reopened, ready_for_review, synchronize, closed]
+    types: [opened, reopened, edited, ready_for_review, synchronize]
 
 permissions:
   issues: write
@@ -25,25 +33,56 @@ permissions:
   contents: read
 
 concurrency:
-  group: master-contribution-workflow-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number || github.event.inputs.number || 'manual' }}
+  group: master-contribution-workflow-${{ github.event_name }}-${{ github.event.issue.user.login || github.event.pull_request.user.login || github.actor || 'manual' }}
   cancel-in-progress: false
+
+env:
+  BURST_WINDOW_HOURS: 6
+  STRONG_WINDOW_HOURS: 24
+  BURST_THRESHOLD: 2
+  STRONG_THRESHOLD: 4
+  MIN_BODY_CHARS: 120
 
 jobs:
   guide_and_enforce:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Act on issue or pull request
+      - name: Guard the queue and enforce contribution quality
         uses: actions/github-script@v7
         with:
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
+            const env = process.env;
+
+            const BURST_WINDOW_HOURS = Number(env.BURST_WINDOW_HOURS || 6);
+            const STRONG_WINDOW_HOURS = Number(env.STRONG_WINDOW_HOURS || 24);
+            const BURST_THRESHOLD = Number(env.BURST_THRESHOLD || 2);
+            const STRONG_THRESHOLD = Number(env.STRONG_THRESHOLD || 4);
+            const MIN_BODY_CHARS = Number(env.MIN_BODY_CHARS || 120);
+
+            const skipUsers = new Set([
+              'github-actions[bot]',
+              'dependabot[bot]',
+              'renovate[bot]'
+            ]);
+
+            const contributorGuide = (actor, details) => `
+            Hi @${actor} 👋
+
+            This repository uses a strict contribution gate to keep the issue tracker and PR queue usable for everyone.
+
+            ${details}
+
+            Please reopen or resubmit only after the report is narrowed to one clear problem, with reproducible details, logs, or a linked issue as appropriate.
+            `;
+
+            const isManualRun = context.eventName === 'workflow_dispatch';
+            const manualMode = (context.payload.inputs?.mode || 'enforce').toLowerCase();
 
             let issue = context.payload.issue ?? null;
             let pr = context.payload.pull_request ?? null;
-
-            const isManualRun = context.eventName === 'workflow_dispatch';
 
             if (isManualRun) {
               const targetType = context.payload.inputs?.target_type;
@@ -70,105 +109,128 @@ jobs:
               return;
             }
 
-            const actor = issue?.user?.login || pr?.user?.login || context.actor;
-
-            const contributorGuide = `
-            Hi @${actor} 👋
-
-            Thanks for contributing.
-
-            To keep this project fair, clear, and easy to review, please follow this flow:
-
-            1. Open one focused issue.
-               - Keep the issue specific and well described.
-               - Avoid mixing multiple unrelated tasks in one issue.
-
-            2. Wait for maintainer review before starting work.
-               - Please do not begin implementation until the issue is acknowledged or assigned.
-               - This helps avoid duplicated work.
-
-            3. Work on one active issue at a time, especially as a new contributor.
-               - Finish the current issue first.
-               - After your PR is merged, you may pick up the next issue.
-
-            4. Open a pull request linked to the issue.
-               - Use clear wording in the PR body.
-               - Prefer "Fixes #<issue>" or "Closes #<issue>" when applicable.
-
-            5. Close the issue politely once the PR is merged.
-               - If your PR resolves the issue, the issue should be closed through the PR or by the maintainers.
-               - Please keep the issue thread respectful and concise.
-
-            Additional rules:
-            - Do not claim multiple issues at once without permission.
-            - Keep pull requests small and relevant.
-            - Do not open duplicate issues or duplicate PRs.
-            - If the implementation changes direction, update the issue thread early.
-            - If you are blocked, comment so the issue can be released for someone else.
-
-            We appreciate careful, high-quality work. Small, focused contributions are easier to review and much easier to merge.
-            `;
-
-            const issueOpened = Boolean(issue && (context.eventName === 'issues' || isManualRun));
-            const prOpenedOrUpdated = Boolean(pr && (context.eventName === 'pull_request_target' || isManualRun));
-
-            async function addComment(number, body) {
-              await github.rest.issues.createComment({
-                owner,
-                repo,
-                issue_number: number,
-                body
-              });
+            const actor = (issue?.user?.login || pr?.user?.login || context.actor || '').trim();
+            if (!actor || skipUsers.has(actor)) {
+              core.info(`Skipping actor ${actor || '(empty)'}.`);
+              return;
             }
 
-            async function addLabels(number, labels) {
-              if (!labels || !labels.length) return;
-              await github.rest.issues.addLabels({
-                owner,
-                repo,
-                issue_number: number,
-                labels
-              }).catch(async (error) => {
-                if (error.status === 404) return;
-                if (error.status === 422) return;
-                throw error;
-              });
-            }
+            const itemNumber = issue?.number || pr?.number;
+            const itemType = issue ? 'issue' : 'pull_request';
+            const itemTitle = (issue?.title || pr?.title || '').trim();
+            const itemBody = (issue?.body || pr?.body || '').trim();
 
             async function ensureLabel(name, color, description) {
               try {
                 await github.rest.issues.getLabel({ owner, repo, name });
               } catch (error) {
                 if (error.status !== 404) throw error;
-                await github.rest.issues.createLabel({
-                  owner,
-                  repo,
-                  name,
-                  color,
-                  description
-                }).catch(e => {
-                  if (e.status !== 422) throw e;
-                });
+                await github.rest.issues.createLabel({ owner, repo, name, color, description })
+                  .catch(e => {
+                    if (e.status !== 422) throw e;
+                  });
               }
+            }
+
+            async function addComment(number, body) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: number, body });
+            }
+
+            async function addLabels(number, labels) {
+              const unique = [...new Set((labels || []).filter(Boolean))];
+              if (!unique.length) return;
+              await github.rest.issues.addLabels({ owner, repo, issue_number: number, labels: unique })
+                .catch(async (error) => {
+                  if (error.status === 404 || error.status === 422) return;
+                  throw error;
+                });
+            }
+
+            async function closeIssue(number) {
+              await github.rest.issues.update({ owner, repo, issue_number: number, state: 'closed' });
+            }
+
+            async function closePullRequest(number) {
+              await github.rest.pulls.update({ owner, repo, pull_number: number, state: 'closed' });
+            }
+
+            function normalizeTitle(title) {
+              return title
+                .toLowerCase()
+                .replace(/`[^`]*`/g, ' ')
+                .replace(/[^a-z0-9]+/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+            }
+
+            function tokenize(title) {
+              const stop = new Set([
+                'a','an','the','and','or','to','of','for','in','on','with','without','by','from','at','as',
+                'issue','bug','fix','feature','enhancement','add','implement','support','update','improve'
+              ]);
+              return normalizeTitle(title)
+                .split(' ')
+                .filter(token => token.length > 2 && !stop.has(token));
+            }
+
+            function tokenOverlapScore(a, b) {
+              const A = new Set(tokenize(a));
+              const B = new Set(tokenize(b));
+              if (!A.size || !B.size) return 0;
+              let common = 0;
+              for (const token of A) if (B.has(token)) common++;
+              return common / Math.max(A.size, B.size);
+            }
+
+            function looksLowQualityIssue(title, body) {
+              const bodyText = body || '';
+              const lower = bodyText.toLowerCase();
+              const hasRepro = /steps to reproduce|reproduction|reproduc/i.test(lower);
+              const hasExpected = /expected/i.test(lower);
+              const hasActual = /actual/i.test(lower);
+              const hasLogs = /log|traceback|stack trace|error/i.test(lower);
+              const hasCodeFence = /```/.test(bodyText);
+              const bodyShort = bodyText.trim().length < MIN_BODY_CHARS;
+              const vagueTitle = tokenize(title).length <= 2;
+              return (bodyShort && !(hasRepro || hasExpected || hasActual || hasLogs || hasCodeFence)) || vagueTitle;
+            }
+
+            function looksLowQualityPR(title, body) {
+              const bodyText = body || '';
+              const lower = bodyText.toLowerCase();
+              const hasSummary = /summary|what|why|changes/i.test(lower);
+              const hasLinkedIssue = /(?:fix(?:es|ed)?|close(?:s|d)?|resolve(?:s|d)?)\s+#\d+/i.test(bodyText);
+              const bodyShort = bodyText.trim().length < MIN_BODY_CHARS;
+              return bodyShort && !hasSummary && !hasLinkedIssue && tokenize(title).length <= 3;
+            }
+
+            async function recentContributions(author, hours) {
+              const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000);
+              const cutoffDate = cutoff.toISOString().slice(0, 10);
+              const q = `repo:${owner}/${repo} author:${author} created:>=${cutoffDate}`;
+              const result = await github.rest.search.issuesAndPullRequests({ q, per_page: 100 });
+              return (result.data.items || []).filter(item => new Date(item.created_at) >= cutoff);
             }
 
             async function parseLinkedIssues(body) {
               if (!body) return [];
               const ids = new Set();
-              const patterns = [
-                /(?:fix(?:es|ed)?|close(?:s|d)?|resolve(?:s|d)?)\s+#(\d+)/gi,
-                /(?:fix(?:es|ed)?|close(?:s|d)?|resolve(?:s|d)?)\s+([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#(\d+)/gi
-              ];
-
-              for (const pattern of patterns) {
-                let match;
-                while ((match = pattern.exec(body)) !== null) {
-                  const n = match[2] ? Number(match[2]) : Number(match[1]);
-                  if (Number.isInteger(n) && n > 0) ids.add(n);
-                }
+              const pattern = /(?:fix(?:es|ed)?|close(?:s|d)?|resolve(?:s|d)?)\s+(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#(\d+)/gi;
+              let match;
+              while ((match = pattern.exec(body)) !== null) {
+                const n = Number(match[1]);
+                if (Number.isInteger(n) && n > 0) ids.add(n);
               }
-
               return [...ids];
+            }
+
+            function contributionStats(items) {
+              const stats = { issues: 0, prs: 0 };
+              for (const item of items) {
+                if (item.pull_request) stats.prs++;
+                else stats.issues++;
+              }
+              return stats;
             }
 
             await ensureLabel('status:needs-review', 'd4c5f9', 'Waiting for maintainer review');
@@ -176,70 +238,135 @@ jobs:
             await ensureLabel('status:needs-info', 'ffd6a5', 'Needs clarification or more details');
             await ensureLabel('status:blocked', 'ffb3c7', 'Blocked pending response');
             await ensureLabel('status:duplicate', 'ffadad', 'Duplicate issue or PR');
+            await ensureLabel('status:possible-spam', 'd73a4a', 'Suspicious burst or low-signal contribution');
+            await ensureLabel('status:rate-limited', 'b60205', 'Contributor posted too many items too quickly');
             await ensureLabel('status:ready-to-close', 'b7eb8f', 'Ready to be closed after merge');
 
-            if (issueOpened) {
-              await addComment(issue.number, contributorGuide);
-              await addLabels(issue.number, ['status:needs-review']);
-            }
+            const recentBurstItems = await recentContributions(actor, BURST_WINDOW_HOURS);
+            const recentStrongItems = await recentContributions(actor, STRONG_WINDOW_HOURS);
 
-            if (prOpenedOrUpdated) {
-              const linkedIssues = await parseLinkedIssues(pr.body || '');
+            const burstStats = contributionStats(recentBurstItems);
+            const strongStats = contributionStats(recentStrongItems);
 
-              if (context.payload.action !== 'closed') {
-                if (!linkedIssues.length) {
-                  const body = `
-                  Hi @${actor} 👋
+            const sameTitleMatches = recentBurstItems.filter(item => {
+              if ((item.number || itemNumber) === itemNumber) return false;
+              return tokenOverlapScore(item.title || '', itemTitle) >= 0.6;
+            });
 
-                  Thanks for the pull request.
+            const lowQuality = itemType === 'issue'
+              ? looksLowQualityIssue(itemTitle, itemBody)
+              : looksLowQualityPR(itemTitle, itemBody);
 
-                  Please link this PR to a relevant issue before review. A good PR should be:
-                  - tied to one approved issue
-                  - focused on a single task
-                  - easy to review
-                  - free of unrelated changes
+            const burstTooFast = (burstStats.issues + burstStats.prs) >= BURST_THRESHOLD;
+            const strongBurst = (strongStats.issues + strongStats.prs) >= STRONG_THRESHOLD;
+            const duplicateLike = sameTitleMatches.length > 0;
+            const linkedIssues = itemType === 'pull_request' ? await parseLinkedIssues(itemBody) : [];
 
-                  Recommended format:
-                  - \`Fixes #123\`
-                  - \`Closes #123\`
-                  - \`Resolves #123\`
+            const actionNotes = [];
+            if (burstTooFast) actionNotes.push(`burst activity: ${burstStats.issues + burstStats.prs} contributions in the last ${BURST_WINDOW_HOURS}h`);
+            if (strongBurst) actionNotes.push(`heavy activity: ${strongStats.issues + strongStats.prs} contributions in the last ${STRONG_WINDOW_HOURS}h`);
+            if (duplicateLike) actionNotes.push(`similar title found in a recent contribution`);
+            if (lowQuality) actionNotes.push(`low-signal report body`);
+            if (itemType === 'pull_request' && !linkedIssues.length) actionNotes.push(`no linked issue reference`);
 
-                  Once the PR is accepted and merged, the issue should be closed politely and the next issue can be picked up.
-                  `;
-                  await addComment(pr.number, body);
-                } else {
-                  for (const number of linkedIssues) {
-                    await addComment(number, `
-                    Hi @${actor} 👋
+            const shouldWarn = burstTooFast || duplicateLike || lowQuality;
+            const shouldEnforceClose =
+              manualMode === 'enforce' &&
+              (
+                (itemType === 'issue' && (burstTooFast || strongBurst || duplicateLike || lowQuality)) ||
+                (itemType === 'pull_request' && (burstTooFast || strongBurst || duplicateLike || (lowQuality && !linkedIssues.length)))
+              );
 
-                    This issue has been linked to a pull request. Thank you for working on it carefully.
+            const reason = actionNotes.length
+              ? `Automated review summary: ${actionNotes.join('; ')}.`
+              : 'Automated review summary: no immediate policy violation detected.';
 
-                    Please keep the PR focused, and once the PR is merged, this issue will be closed politely through the normal review flow.
-                    `);
-                    await addLabels(number, ['status:in-progress']);
-                  }
-                }
+            if (itemType === 'issue') {
+              if (shouldWarn) {
+                await addComment(itemNumber, contributorGuide(actor, `
+                ${reason}
+
+                To keep triage fair and accurate, this issue is being reviewed as a burst or duplicate-risk submission.
+                `));
+                await addLabels(itemNumber, [
+                  'status:needs-review',
+                  burstTooFast ? 'status:rate-limited' : null,
+                  duplicateLike ? 'status:duplicate' : null,
+                  lowQuality ? 'status:needs-info' : null,
+                  'status:possible-spam'
+                ]);
               }
 
-              if (context.payload.action === 'closed' && pr.merged) {
-                const mergedIssues = await parseLinkedIssues(pr.body || '');
-                for (const number of mergedIssues) {
-                  await addComment(number, `
-                  Hi @${actor} 👋
+              if (shouldEnforceClose) {
+                await addComment(itemNumber, `
+                Hi @${actor} 👋
 
-                  This issue has been resolved by a merged pull request. Thank you for the disciplined contribution.
+                This issue is being closed automatically because it appears to be part of a rapid burst, duplicate pattern, or low-signal contribution.
 
-                  Closing this issue now to keep the workflow clean and up to date.
-                  `);
-                  await github.rest.issues.update({
-                    owner,
-                    repo,
-                    issue_number: number,
-                    state: 'closed'
-                  }).catch(async (error) => {
-                    if (error.status === 404 || error.status === 410) return;
-                    throw error;
-                  });
-                }
+                Recent activity in this repository for this author:
+                - ${burstStats.issues + burstStats.prs} contributions in the last ${BURST_WINDOW_HOURS} hours
+                - ${strongStats.issues + strongStats.prs} contributions in the last ${STRONG_WINDOW_HOURS} hours
+
+                Please reopen only with a single, focused report that includes reproduction steps, expected behavior, actual behavior, and logs or code references.
+                `);
+                await closeIssue(itemNumber);
               }
             }
+
+            if (itemType === 'pull_request') {
+              const linkedIssueText = linkedIssues.length ? `Linked issue(s): ${linkedIssues.map(n => `#${n}`).join(', ')}.` : 'No linked issue was detected in the PR body.';
+
+              if (shouldWarn) {
+                await addComment(itemNumber, contributorGuide(actor, `
+                ${reason}
+
+                ${linkedIssueText}
+                Please keep the pull request tightly scoped and linked to a single issue when possible.
+                `));
+                await addLabels(itemNumber, [
+                  'status:needs-review',
+                  burstTooFast ? 'status:rate-limited' : null,
+                  duplicateLike ? 'status:duplicate' : null,
+                  lowQuality ? 'status:needs-info' : null,
+                  'status:possible-spam'
+                ]);
+              }
+
+              if (shouldEnforceClose) {
+                await addComment(itemNumber, `
+                Hi @${actor} 👋
+
+                This pull request is being closed automatically because it matches the burst-activity policy:
+                - ${burstStats.issues + burstStats.prs} contributions in the last ${BURST_WINDOW_HOURS} hours
+                - ${strongStats.issues + strongStats.prs} contributions in the last ${STRONG_WINDOW_HOURS} hours
+                - ${linkedIssues.length ? 'a linked issue was detected, but the contribution pattern is still too dense.' : 'no linked issue was detected.'}
+
+                Please resubmit with one focused change set and one linked issue.
+                `);
+                await closePullRequest(itemNumber);
+              }
+            }
+
+            if (context.eventName === 'pull_request_target' && context.payload.action === 'closed' && pr?.merged) {
+              const mergedIssues = await parseLinkedIssues(pr.body || '');
+              for (const number of mergedIssues) {
+                await addComment(number, `
+                Hi @${actor} 👋
+
+                This issue has been resolved by a merged pull request.
+                Thank you for the disciplined contribution.
+
+                Closing this issue now.
+                `);
+                await closeIssue(number).catch(async (error) => {
+                  if (error.status === 404 || error.status === 410) return;
+                  throw error;
+                });
+              }
+            }
+
+            if (manualMode === 'audit' && shouldWarn) {
+              core.info('Audit mode enabled: warnings were posted, but no automatic close was performed.');
+            }
+          env:
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
