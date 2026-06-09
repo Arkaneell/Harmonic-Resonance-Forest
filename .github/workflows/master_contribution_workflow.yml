@@ -4,18 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       target_type:
-        description: Select what to process
+        description: Select whether to process an issue or a pull request
         required: true
         type: choice
         options:
           - issue
           - pull_request
-          - all_issues
-          - all_pull_requests
-          - all_open_items
       number:
-        description: Issue or pull request number (leave blank for all modes)
-        required: false
+        description: Issue or pull request number
+        required: true
         type: string
       mode:
         description: Choose whether to audit or enforce
@@ -87,79 +84,41 @@ jobs:
             let issue = context.payload.issue ?? null;
             let pr = context.payload.pull_request ?? null;
 
-            async function processItem(issueInput, prInput, routeManual = true) {
-              const issue = issueInput ?? null;
-              const pr = prInput ?? null;
+            if (isManualRun) {
+              const targetType = context.payload.inputs?.target_type;
+              const rawNumber = context.payload.inputs?.number;
+              const number = Number(rawNumber);
 
-              if (!issue && !pr) {
-                core.info('No issue or pull request context found. Nothing to do.');
+              if (!Number.isInteger(number) || number <= 0) {
+                core.setFailed('workflow_dispatch requires a valid issue or pull request number.');
                 return;
               }
 
-              const actor = (issue?.user?.login || pr?.user?.login || context.actor || '').trim();
-              if (!actor || skipUsers.has(actor)) {
-                core.info(`Skipping actor ${actor || '(empty)'}.`);
+              if (targetType === 'issue') {
+                issue = (await github.rest.issues.get({ owner, repo, issue_number: number })).data;
+              } else if (targetType === 'pull_request') {
+                pr = (await github.rest.pulls.get({ owner, repo, pull_number: number })).data;
+              } else {
+                core.setFailed(`Unsupported target_type: ${targetType}`);
                 return;
               }
+            }
 
-              const itemNumber = issue?.number || pr?.number;
-              const itemType = issue ? 'issue' : 'pull_request';
-              const itemTitle = (issue?.title || pr?.title || '').trim();
-              const itemBody = (issue?.body || pr?.body || '').trim();
+            if (!issue && !pr) {
+              core.info('No issue or pull request context found. Nothing to do.');
+              return;
+            }
 
-              if (isManualRun && routeManual) {
-                const targetType = context.payload.inputs?.target_type;
-                const rawNumber = context.payload.inputs?.number;
-                const number = Number(rawNumber);
+            const actor = (issue?.user?.login || pr?.user?.login || context.actor || '').trim();
+            if (!actor || skipUsers.has(actor)) {
+              core.info(`Skipping actor ${actor || '(empty)'}.`);
+              return;
+            }
 
-                if (targetType === 'issue' || targetType === 'pull_request') {
-                  if (!Number.isInteger(number) || number <= 0) {
-                    core.setFailed('workflow_dispatch requires a valid issue or pull request number.');
-                    return;
-                  }
-
-                  if (targetType === 'issue') {
-                    const loadedIssue = (await github.rest.issues.get({ owner, repo, issue_number: number })).data;
-                    return processItem(loadedIssue, null, false);
-                  } else {
-                    const loadedPr = (await github.rest.pulls.get({ owner, repo, pull_number: number })).data;
-                    return processItem(null, loadedPr, false);
-                  }
-                }
-
-                if (targetType === 'all_issues' || targetType === 'all_open_items') {
-                  const issues = await github.paginate(github.rest.issues.listForRepo, {
-                    owner,
-                    repo,
-                    state: 'open',
-                    per_page: 100
-                  });
-
-                  for (const item of issues) {
-                    if (item.pull_request) continue;
-                    await processItem(item, null, false);
-                  }
-                }
-
-                if (targetType === 'all_pull_requests' || targetType === 'all_open_items') {
-                  const prs = await github.paginate(github.rest.pulls.list, {
-                    owner,
-                    repo,
-                    state: 'open',
-                    per_page: 100
-                  });
-
-                  for (const item of prs) {
-                    await processItem(null, item, false);
-                  }
-                }
-
-                if (!['issue', 'pull_request', 'all_issues', 'all_pull_requests', 'all_open_items'].includes(targetType)) {
-                  core.setFailed(`Unsupported target_type: ${targetType}`);
-                }
-
-                return;
-              }
+            const itemNumber = issue?.number || pr?.number;
+            const itemType = issue ? 'issue' : 'pull_request';
+            const itemTitle = (issue?.title || pr?.title || '').trim();
+            const itemBody = (issue?.body || pr?.body || '').trim();
 
             async function ensureLabel(name, color, description) {
               try {
@@ -409,4 +368,7 @@ jobs:
             if (manualMode === 'audit' && shouldWarn) {
               core.info('Audit mode enabled: warnings were posted, but no automatic close was performed.');
             }
-            }
+          env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+            
